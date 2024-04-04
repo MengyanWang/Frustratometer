@@ -1,75 +1,71 @@
 import random
-import math
+import numpy as np
 import frustratometer
-from math import exp, log, factorial
-from collections import Counter
+import pandas as pd  # Import pandas for data manipulation
 
-native_pdb = "1r69.pdb"  
-
-mcso_seq_output_file = "mcso_sequence.txt"
-mcso_energy_output_file = "mcso_energy.txt"
-
-def frust(model, seq):
-    energy = model.native_energy(seq)
-    return energy
-
-def permut(sequence):
-    rand_res_1, rand_res_2 = random.sample(range(len(sequence)), 2)
-    sequence[rand_res_1], sequence[rand_res_2] = sequence[rand_res_2], sequence[rand_res_1]
+def sequence_permutation(sequence):
+    sequence = sequence.copy()
+    res1, res2 = random.sample(range(len(sequence)), 2)
+    sequence[res1], sequence[res2] = sequence[res2], sequence[res1]
     return sequence
 
-def point_mut(sequence):
+def sequence_mutation(sequence):
     amino_acids = 'ACDEFGHIKLMNPQRSTVWY'
-    posi2mut = random.randint(0, len(sequence) - 1)
-    aa2mut = random.choice(amino_acids)
-    sequence = sequence[:posi2mut] + [aa2mut] + sequence[posi2mut + 1:]
+    sequence = sequence.copy()
+    res = random.randint(0, len(sequence) - 1)
+    aa = random.choice(amino_acids)
+    sequence[res] = aa
     return sequence
 
-def np(seq):
-    N = len(seq)
-    amino_acid_counts = Counter(seq)
-    np_numerator = factorial(N)
-    np_denominator = 1
-    for count in amino_acid_counts.values():
-        np_denominator *= factorial(count)
-    return np_numerator / np_denominator
+def heterogeneity(sequence):
+    N = len(sequence)
+    _, counts = np.unique(sequence, return_counts=True)
+    denominator = np.prod(np.array([np.math.factorial(count) for count in counts]))
+    het = np.math.factorial(N) / denominator
+    return np.log(het)
 
-def mutation_process(temp,model,seq):
-    k_b = 0.001987  # Boltzmann constant in kcal/mol*K
-    Ep = 100 # Scale factor for heterogeneity in pacc, set 1 for testing
-    mcso_seq = seq
-    for _ in range(100): # Maybe 1000 for formal testing
-                
-        # Perform permutation or point mutation
-        x = random.random()
-        if x > 0.5:
-            mut_seq = permut(seq[:])
-        else:
-            mut_seq = point_mut(seq[:])
-        
-        native_energy = frust(model, seq)  
-        mutated_energy = frust(model, mut_seq)
-        energy_difference = mutated_energy - native_energy #mut1 nat2  #-
+def heterogeneity_approximation(sequence):
+    """
+    Uses Stirling's approximation to calculate the heterogeneity of a sequence
+    """
+    N = len(sequence)
+    _, counts = np.unique(sequence, return_counts=True)
+    def stirling_log(n):
+        return 0.5 * np.log(2 * np.pi * n) + n * np.log(n / np.e)
+    
+    log_n_factorial = stirling_log(N)
+    log_denominator = sum(stirling_log(count) for count in counts)
+    het = log_n_factorial - log_denominator
+    return het
 
-        np_old = np(seq)
-        np_new = np(mut_seq)
-        pacc = min(1, exp((-energy_difference + Ep * log(np_new / np_old)) / (k_b * temp))) #- -> <0
-        random_probability = random.random()
-        # if random_probability > math.exp(-energy_difference / (k_b * temp)):# Will generate homopolymer?
-        if random_probability < pacc:
-            mcso_seq = mut_seq
-        
+def montecarlo_steps(temperature, model, sequence, Ep=100, n_steps = 1000):
+    kb = 0.001987
+    energy = model.native_energy(sequence)
+    het = heterogeneity_approximation(sequence)
+    for _ in range(n_steps):
+        new_sequence = sequence_permutation(sequence) if random.random() > 0.5 else sequence_mutation(sequence)
+        new_energy = model.native_energy(new_sequence)
+        new_het = heterogeneity_approximation(new_sequence)
+        energy_difference = new_energy - energy
+        het_difference = new_het - het
+        exponent=(-energy_difference + Ep * het_difference) / (kb * temperature)
+        acceptance_probability = np.exp(min(0, exponent))
+        if random.random() < acceptance_probability:
+            sequence = new_sequence
+            energy = new_energy
+            het = new_het
+    return sequence, energy, het
 
-
-        seq=mcso_seq
-    return seq
-
-if __name__=='__main__':
-    structure = frustratometer.Structure.full_pdb(native_pdb,"A")
-    model = frustratometer.AWSEM(structure,distance_cutoff_contact=10, min_sequence_separation_contact=2)
-    seq = list("SISSRVKSKRIQLGLNQAELAQKVGTTQQSIEQLENGKTKRPRFLPELASALGVSVDWLLNGT")
-    with open(mcso_seq_output_file, 'w') as seq_file, open(mcso_energy_output_file, 'w') as energy_file:
-        for temp in range(800, 199, -1):# Sample temperatures For simulated annealing
-            seq = mutation_process(temp,model,seq)
-            seq_file.write(f'Temperature: {temp} Sequence: {" ".join(seq)}\n')
-            energy_file.write(f'Temperature: {temp} Energy: {frust(model, seq)}\n')
+if __name__ == '__main__':
+    native_pdb = "tests/data/1r69.pdb"
+    structure = frustratometer.Structure.full_pdb(native_pdb, "A")
+    model = frustratometer.AWSEM(structure, distance_cutoff_contact=10, min_sequence_separation_contact=2)
+    sequence = list("SISSRVKSKRIQLGLNQAELAQKVGTTQQSIEQLENGKTKRPRFLPELASALGVSVDWLLNGT")
+    
+    simulation_data = []
+    for temp in range(800, 1, -1):
+        sequence, energy, het = montecarlo_steps(temp, model, sequence, Ep=10, n_steps=1000)
+        simulation_data.append({'Temperature': temp, 'Sequence': ''.join(sequence), 'Energy': energy, 'Heterogeneity': het})
+        print(temp, ''.join(sequence), energy, het)
+    simulation_df = pd.DataFrame(simulation_data)
+    simulation_df.to_csv("mcso_simulation_results.csv", index=False)
